@@ -29,17 +29,12 @@ type ServerInfo struct {
 // older than Trino 469 do not answer that request, and Ping skips the
 // credentials check for them. With external authentication, the request can
 // start the login flow when no valid token is cached.
-//
-// Gateways in front of the cluster may not expose /v1/info and answer 404;
-// Ping then cannot tell whether the server is starting and skips that check.
 func (c *Conn) Ping(ctx context.Context) error {
 	info, err := c.ServerInfo(ctx)
-	var queryFailed *ErrQueryFailed
-	switch {
-	case errors.As(err, &queryFailed) && queryFailed.StatusCode == http.StatusNotFound:
-	case err != nil:
+	if err != nil {
 		return err
-	case info.Starting:
+	}
+	if info.Starting {
 		return errors.New("trino: server is still starting")
 	}
 	return c.validateCredentials(ctx)
@@ -90,10 +85,12 @@ func (c *Conn) ServerInfo(ctx context.Context) (ServerInfo, error) {
 // failing Ping for them would make database/sql unusable with those
 // servers, so 405 only means the credentials cannot be checked.
 //
-// Some gateways answer HEAD with 401 and no challenge, while a POST gets the
-// external authentication challenge. With external authentication enabled,
-// that 401 does not show the credentials are bad: the first query receives
-// the challenge and logs in, so it also only means they cannot be checked.
+// Some gateways, such as Starburst Galaxy's, answer HEAD with 401 and no
+// challenge, while a POST gets the external authentication challenge. With
+// external authentication enabled, that 401 does not show the credentials
+// are bad: the first query receives the challenge and logs in, so it also
+// only means they cannot be checked.
+// A 401 without a challenge that follows one still fails Ping.
 func (c *Conn) validateCredentials(ctx context.Context) error {
 	req, err := c.newRequest(ctx, http.MethodHead, c.baseURL+"/v1/statement", nil, nil)
 	if err != nil {
