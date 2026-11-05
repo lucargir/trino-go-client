@@ -28,7 +28,9 @@ type ServerInfo struct {
 // validateConnection=true, so rejected credentials fail it too. Servers
 // older than Trino 469 do not answer that request, and Ping skips the
 // credentials check for them. With external authentication, the request can
-// start the login flow when no valid token is cached.
+// start the login flow when no valid token is cached. With
+// validateConnection=false, Ping skips the credentials check, for servers
+// that reject that request although queries succeed.
 func (c *Conn) Ping(ctx context.Context) error {
 	info, err := c.ServerInfo(ctx)
 	if err != nil {
@@ -36,6 +38,9 @@ func (c *Conn) Ping(ctx context.Context) error {
 	}
 	if info.Starting {
 		return errors.New("trino: server is still starting")
+	}
+	if !c.validateConnection {
+		return nil
 	}
 	return c.validateCredentials(ctx)
 }
@@ -84,13 +89,6 @@ func (c *Conn) ServerInfo(ctx context.Context) (ServerInfo, error) {
 // before Trino 469 answer 405, which JDBC reports as an invalid connection;
 // failing Ping for them would make database/sql unusable with those
 // servers, so 405 only means the credentials cannot be checked.
-//
-// Some gateways, such as Starburst Galaxy's, answer HEAD with 401 and no
-// challenge, while a POST gets the external authentication challenge. With
-// external authentication enabled, that 401 does not show the credentials
-// are bad: the first query receives the challenge and logs in, so it also
-// only means they cannot be checked.
-// A 401 without a challenge that follows one still fails Ping.
 func (c *Conn) validateCredentials(ctx context.Context) error {
 	req, err := c.newRequest(ctx, http.MethodHead, c.baseURL+"/v1/statement", nil, nil)
 	if err != nil {
@@ -98,7 +96,7 @@ func (c *Conn) validateCredentials(ctx context.Context) error {
 	}
 	resp, err := c.roundTrip(ctx, req)
 	var queryFailed *ErrQueryFailed
-	if errors.As(err, &queryFailed) && (queryFailed.StatusCode == http.StatusMethodNotAllowed || queryFailed.noExternalAuthChallenge) {
+	if errors.As(err, &queryFailed) && queryFailed.StatusCode == http.StatusMethodNotAllowed {
 		return nil
 	}
 	if err != nil {

@@ -69,6 +69,21 @@ func TestPingSucceedsWhenServerCannotValidateCredentials(t *testing.T) {
 	require.NoError(t, db.PingContext(context.Background()))
 }
 
+// Starburst Galaxy answers HEAD /v1/statement with 401 and no challenge,
+// while queries receive the external authentication challenge.
+func TestPingSkipsCredentialsCheckWhenValidationIsDisabled(t *testing.T) {
+	t.Parallel()
+	fc := newFakeCoordinator(t)
+	serveServerInfoAndCredentialsCheck(fc, http.StatusUnauthorized)
+	db := fc.open(t, "?validateConnection=false")
+
+	require.NoError(t, db.PingContext(context.Background()))
+
+	requests := fc.capturedRequests()
+	require.Len(t, requests, 1)
+	assert.Equal(t, "/v1/info", requests[0].path)
+}
+
 func TestPingFailsWhenCredentialsCheckFails(t *testing.T) {
 	t.Parallel()
 	fc := newFakeCoordinator(t)
@@ -225,105 +240,4 @@ func rawServerInfo(t *testing.T, db *sql.DB) (ServerInfo, error) {
 		return err
 	})
 	return info, err
-}
-
-// Starburst Galaxy answers HEAD /v1/statement with 401 and no challenge, while
-// POST /v1/statement carries the external authentication challenge. The first
-// query receives the challenge and logs in, so Ping must not fail on the 401.
-func TestPingSucceedsWhenCredentialsCheckHasNoChallenge(t *testing.T) {
-	t.Parallel()
-	fc := newFakeTLSCoordinator(t)
-	serveServerInfoAndCredentialsCheck(fc, http.StatusUnauthorized)
-	redirects := &recordingRedirects{}
-	db := openExternalAuth(t, fc, &Config{RedirectHandler: redirects.handle})
-
-	require.NoError(t, db.PingContext(context.Background()))
-
-	requests := fc.capturedRequests()
-	require.Len(t, requests, 2)
-	assert.Equal(t, http.MethodHead, requests[1].method)
-	assert.Equal(t, "/v1/statement", requests[1].path)
-	assert.Zero(t, redirects.count(), "Ping should not start a login")
-}
-
-// A token from a login that is then rejected still fails Ping, even when the
-// rejection carries no challenge.
-func TestPingWithExternalAuthenticationFailsWhenLoginTokenIsRejected(t *testing.T) {
-	t.Parallel()
-	fc := newFakeTLSCoordinator(t)
-	auth := newFakeExternalAuth(fc, "token1")
-	fc.onRequest(func(w http.ResponseWriter, r *http.Request) bool {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/info":
-			_, _ = w.Write([]byte(`{"nodeVersion":{"version":"483"},"environment":"test","coordinator":true,"starting":false}`))
-		case r.Method == http.MethodHead && r.Header.Get(authorizationHeader) == "Bearer token1":
-			w.WriteHeader(http.StatusUnauthorized)
-		default:
-			return auth.serve(w, r)
-		}
-		return true
-	})
-	redirects := &recordingRedirects{}
-	db := openExternalAuth(t, fc, &Config{RedirectHandler: redirects.handle})
-
-	err := db.PingContext(context.Background())
-
-	var queryFailed *ErrQueryFailed
-	require.ErrorAs(t, err, &queryFailed)
-	assert.Equal(t, http.StatusUnauthorized, queryFailed.StatusCode)
-	assert.Equal(t, 1, redirects.count(), "Ping should have logged in")
-}
-
-// A server that challenged the request can check the credentials, so a
-// cached token it then rejects without a challenge still fails Ping.
-func TestPingWithExternalAuthenticationFailsWhenCachedTokenIsRejected(t *testing.T) {
-	t.Parallel()
-	fc := newFakeTLSCoordinator(t)
-	auth := newFakeExternalAuth(fc, "token1")
-	redirects := &recordingRedirects{}
-	connector, err := NewConnector(&Config{
-		ServerURI:                     fc.url(),
-		ExternalAuthentication:        true,
-		ExternalAuthenticationTimeout: ptr(5 * time.Second),
-		HTTPClient:                    fc.server.Client(),
-		RedirectHandler:               redirects.handle,
-	})
-	require.NoError(t, err)
-	fc.onRequest(func(w http.ResponseWriter, r *http.Request) bool {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/info":
-			_, _ = w.Write([]byte(`{"nodeVersion":{"version":"483"},"environment":"test","coordinator":true,"starting":false}`))
-		case r.Method == http.MethodHead && r.Header.Get(authorizationHeader) == "":
-			// another connection caches a token while the challenge is on its way
-			connector.externalAuth.cache.SetToken("stale")
-			return auth.serve(w, r)
-		case r.Method == http.MethodHead:
-			w.WriteHeader(http.StatusUnauthorized)
-		default:
-			return auth.serve(w, r)
-		}
-		return true
-	})
-	db := sql.OpenDB(connector)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-	err = db.PingContext(context.Background())
-
-	var queryFailed *ErrQueryFailed
-	require.ErrorAs(t, err, &queryFailed)
-	assert.Equal(t, http.StatusUnauthorized, queryFailed.StatusCode)
-	assert.Zero(t, redirects.count(), "Ping should have reused the cached token")
-}
-
-func TestPingWithExternalAuthenticationFailsWhenCredentialsCheckFails(t *testing.T) {
-	t.Parallel()
-	fc := newFakeTLSCoordinator(t)
-	serveServerInfoAndCredentialsCheck(fc, http.StatusForbidden)
-	db := openExternalAuth(t, fc, &Config{})
-
-	err := db.PingContext(context.Background())
-
-	var queryFailed *ErrQueryFailed
-	require.ErrorAs(t, err, &queryFailed)
-	assert.Equal(t, http.StatusForbidden, queryFailed.StatusCode)
 }
