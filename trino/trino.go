@@ -2014,7 +2014,9 @@ func (c *Conn) roundTrip(ctx context.Context, req *http.Request) (*http.Response
 			}
 			challenge, err := parseExternalAuthChallenge(resp.Header)
 			if challenge == nil && err == nil {
-				return nil, newErrQueryFailedFromResponse(resp)
+				queryFailed := newErrQueryFailedFromResponse(resp)
+				queryFailed.noExternalAuthChallenge = true
+				return nil, queryFailed
 			}
 			resp.Body.Close()
 			if err != nil {
@@ -2357,6 +2359,10 @@ func (c *Conn) deleteHTTPHeader(name string) {
 type ErrQueryFailed struct {
 	StatusCode int
 	Reason     error
+
+	// noExternalAuthChallenge is set on a 401 that external authentication
+	// could not act on, because the response carried no challenge for it.
+	noExternalAuthChallenge bool
 }
 
 // Error implements the error interface.
