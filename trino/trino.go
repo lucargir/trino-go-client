@@ -3197,9 +3197,6 @@ func (qr *driverRows) Close() error {
 		if err != nil && err != io.EOF {
 			return err
 		}
-		if qr.nextURI == "" {
-			return nil
-		}
 	} else {
 		select {
 		case _, ok := <-qr.stmt.spoolingRowsChannel:
@@ -3211,20 +3208,28 @@ func (qr *driverRows) Close() error {
 			// no data is ready
 		}
 	}
+	// The client protocol cancels a query with a DELETE to its nextUri, which
+	// gateways such as Starburst Galaxy route like the other statement
+	// requests. Any nextUri of the query works, also one already fetched by
+	// the spooling workers, and without one the query has finished.
+	if qr.nextURI == "" {
+		return nil
+	}
 	hs := make(http.Header)
 	if qr.stmt.user != "" {
 		hs.Add(trinoUserHeader, qr.stmt.user)
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(qr.ctx), DefaultCancelQueryTimeout)
 	defer cancel()
-	req, err := qr.stmt.conn.newRequest(ctx, "DELETE", qr.stmt.conn.baseURL+"/v1/query/"+url.PathEscape(qr.queryID), nil, hs)
+	req, err := qr.stmt.conn.newRequest(ctx, "DELETE", qr.nextURI, nil, hs)
 	if err != nil {
 		return err
 	}
 	resp, err := qr.stmt.conn.roundTrip(ctx, req)
 	if err != nil {
+		// 404 means the query is already gone
 		qferr, ok := err.(*ErrQueryFailed)
-		if ok && qferr.StatusCode == http.StatusNoContent {
+		if ok && (qferr.StatusCode == http.StatusNoContent || qferr.StatusCode == http.StatusNotFound) {
 			qr.nextURI = ""
 			return nil
 		}

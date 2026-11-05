@@ -560,7 +560,7 @@ func TestRoundTripRefusesRedirectsAfterTheStatement(t *testing.T) {
 		{
 			name:   "cancel DELETE",
 			method: http.MethodDelete,
-			path:   "/v1/query/" + fakeQueryID,
+			path:   "/v1/statement/" + fakeQueryID + "/3",
 			pages: func() []page {
 				return []page{statementPage(), resultPage([][]any{{1}}), resultPage([][]any{{2}}), resultPage([][]any{{3}})}
 			},
@@ -605,16 +605,19 @@ func TestRoundTripRefusesRedirectsAfterTheStatement(t *testing.T) {
 	}
 }
 
-// Closing rows that have more than one page left sends a DELETE for the query.
-// The coordinator answers it with 204; any other answer is returned from Close.
+// Closing rows that have more than one page left sends a DELETE to the
+// nextUri. The coordinator answers it with 204, or with 404 when the query is
+// already gone; any other answer is returned from Close.
 func TestRowsCloseCancelsTheQuery(t *testing.T) {
 	t.Parallel()
-	t.Run(http.StatusText(http.StatusNoContent), func(t *testing.T) {
-		t.Parallel()
-		deletes, err := cancelQuery(t, http.StatusNoContent)
-		require.NoError(t, err)
-		assert.Equal(t, 1, deletes)
-	})
+	for _, status := range []int{http.StatusNoContent, http.StatusNotFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			deletes, err := cancelQuery(t, status)
+			require.NoError(t, err)
+			assert.Equal(t, 1, deletes)
+		})
+	}
 	for _, status := range []int{
 		http.StatusTooManyRequests,
 		http.StatusBadGateway,
@@ -635,7 +638,6 @@ func TestRowsCloseCancelsTheQuery(t *testing.T) {
 		http.StatusBadRequest,
 		http.StatusUnauthorized,
 		http.StatusForbidden,
-		http.StatusNotFound,
 		http.StatusInternalServerError,
 	} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
